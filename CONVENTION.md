@@ -5,7 +5,7 @@ BUTILL_BE(소상공인 경영 리스크 관리 시스템 백엔드)에서 일하
 
 - 규칙끼리 부딪치거나 바꿀 필요가 생기면 이 문서를 먼저 고치고 팀원과 합의한다.
 - 아직 정하지 못한 항목은 `TO_DECIDE.md`에 있다. 정해지면 이 문서로 옮긴다.
-- 2장 일부와 6·7장은 PR #17(`feature/mvp-analysis`)의 구현 기준으로 정한 내용이다.
+- 2장 일부와 6·7장은 PR #17(`feature/mvp-analysis`)의 구현 기준으로 정한 내용이다. 외부 API 규칙(8장)은 원재료 가격·지원사업 연동(#19, #20) 기준이다.
 
 ---
 
@@ -80,8 +80,11 @@ BUTILL_BE(소상공인 경영 리스크 관리 시스템 백엔드)에서 일하
 | `SUPABASE_KEY` | **publishable(`sb_publishable_`) 또는 anon 키만** 쓴다. secret/service_role 키는 코드에서 거부한다 |
 | `BUTILL_ANALYSIS_ONLY` | `1`이면 DB 설정 없이 계산 미리보기 API만 띄운다. 기본값 `0` |
 | `BUTILL_CORS_ORIGINS` | 허용 출처, 쉼표로 구분. 기본값 `https://localhost` |
+| `DATA_GO_KR_SERVICE_KEY` | 공공데이터포털 계정 인증키(Decoding). aT 원재료 가격 API에 쓴다 |
+| `BIZINFO_API_KEY` | 기업마당 지원사업정보 API 인증키 |
+| `SEOUL_OPENAPI_KEY` | 서울 열린데이터광장 인증키(상권 데이터) |
 
-환경변수를 바꾸면 서버를 재시작한다.
+환경변수를 바꾸면 서버를 재시작한다. 실제 키는 `.env`에만 두고, `api.json` 같은 정리 파일이나 문서·채팅에 적지 않는다.
 
 ### 로컬 실행
 
@@ -107,6 +110,8 @@ python -m pip check
 
 - 테스트는 `tests/`에 두고 FastAPI `TestClient`로 실제 라우트까지 확인한다.
 - 계산 로직(services)을 바꾸면 테스트를 함께 고치고 위 명령을 통과시킨다.
+- 테스트는 실제 외부 API를 호출하지 않는다. `httpx.MockTransport`로 응답을 흉내 낸다.
+- 앱이 시작할 때 `.env`를 읽으므로, 테스트는 `.env`의 `BUTILL_ANALYSIS_ONLY=0`에서 돌린다. 계산 전용 모드는 실행할 때만 환경변수로 켠다.
 
 ### 의존성 관리
 
@@ -251,6 +256,7 @@ ChatGPT든 Claude든 AI가 만든 코드도 이 문서의 규칙을 똑같이 �
 | 409 | `CONFLICT`, `SAVED_INPUT_INVALID`, `CALCULATION_VERSION_MISMATCH` | 저장 버전 충돌, 저장된 입력 손상, 계산 버전 불일치 |
 | 422 | `INVALID_INPUT`, `INVALID_SCENARIO` | 입력값 오류 |
 | 503 | `DB_UNAVAILABLE`, `AUTH_UNAVAILABLE`, `CONFIG_REQUIRED` 등 그 외 | 연결 장애, 설정 누락 |
+| 503 | `PRICE_SOURCE_*`, `SUPPORT_SOURCE_*`, `EXTERNAL_SOURCE_*` (`UNAVAILABLE`, `REJECTED`, `INVALID`) | 외부 API 연결 실패, 인증키 거부, 응답 형식 오류 |
 
 ### 인증
 
@@ -279,3 +285,21 @@ ChatGPT든 Claude든 AI가 만든 코드도 이 문서의 규칙을 똑같이 �
 - 마이그레이션 파일명은 원격 Supabase 이력 버전(`YYYYMMDDHHMMSS_<설명>.sql`)에 맞춘다.
 - 사용자 소유 테이블에는 RLS를 켜고, `authenticated` 역할에 필요한 최소 권한만 준다. `anon` 역할에는 사용자 테이블 권한을 주지 않는다.
 - 분석·시나리오 이력은 사용자에게 UPDATE/DELETE 권한을 주지 않는다.
+
+---
+
+## 8. 외부 API
+
+| 데이터 | 출처 | 앱 API | 문서 |
+|---|---|---|---|
+| 원재료 가격 | 공공데이터포털 aT 일별 도·소매 가격 | `GET /api/v1/ingredient-prices` | `docs/ingredient-prices.md` |
+| 지원사업 공고 | 기업마당 지원사업정보 | `GET /api/v1/support-programs` | `docs/support-programs.md` |
+| 상권(예정) | 서울 열린데이터광장, 소진공 상가정보 | — | — |
+
+- 외부 API 호출은 `app/database/`의 클라이언트만 한다. 앱(프론트)은 외부 API를 직접 부르지 않고 우리 서버 API만 부른다.
+- 인증키는 서버 환경변수로만 쓰고, 오류 메시지·로그에 키나 키가 든 URL을 남기지 않는다. 오류는 `raise ... from None`으로 원인 예외를 끊는다.
+- 호출에는 시간제한(10초, 연결 5초)을 두고, 연결 실패와 5xx만 1회 재시도한다.
+- 외부 자료의 결측·수집 실패를 0원이나 빈 값으로 바꾸지 않는다. 품목·출처별 상태(`success`/`no_data`/`failed`)로 구분하고, 일부가 실패해도 나머지 결과는 돌려준다.
+- 외부 가격은 참고 정보다. 매장 식재료비나 현금흐름 계산에 자동 반영하지 않는다.
+- 같은 날 반복 호출을 줄이기 위해 응답을 서버 메모리에 3시간 캐시한다(일부 실패 시 10분). DB 저장 여부는 TO_DECIDE #17에서 정한다.
+- httpx `base_url`에는 경로 끝 파일명까지 넣지 않는다(`base_url` 뒤에 `/`가 붙어 주소가 바뀐다). 기본 주소와 경로를 나눈다.

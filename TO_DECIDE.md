@@ -21,8 +21,10 @@ PR #17(`feature/mvp-analysis`)의 구현으로 정해진 내용은 `CONVENTION.m
 | 11 | 도메인 모델 / 용어집 | 기획 후 | [x] → CONVENTION 4장 |
 | 12 | 로깅 | 낮음 | [ ] |
 | 13 | 경영정보 저장 구조 (JSONB / 정규화) | 높음 | [ ] |
-| 14 | 계산 미리보기 API 공개 범위 | 중간 | [ ] |
+| 14 | 로그인 없이 쓰는 API 공개 범위 | 중간 | [ ] |
 | 15 | 스키마 이름 / 라우터 배치 규칙 | 중간 | [ ] |
+| 16 | 지원사업 정보 기능 범위 | 높음 | [ ] |
+| 17 | 외부 데이터 저장 방식 (캐시 / DB) | 중간 | [ ] |
 
 우선순위 "높음"은 둘이 따로 개발을 시작하기 **전에** 정해야 하는 것이다.
 
@@ -30,12 +32,12 @@ PR #17(`feature/mvp-analysis`)의 구현으로 정해진 내용은 `CONVENTION.m
 
 ## 4. 환경 분리 (Supabase 프로젝트, 키 관리)
 
-**정해진 것 (CONVENTION 2장):** 사용자 데이터 API에는 publishable/anon 키만 쓴다. secret/service_role 키는 코드에서 거부한다. 환경변수 이름은 `SUPABASE_URL`, `SUPABASE_KEY`, `BUTILL_ANALYSIS_ONLY`, `BUTILL_CORS_ORIGINS`이다.
+**정해진 것 (CONVENTION 2장):** 사용자 데이터 API에는 publishable/anon 키만 쓴다. secret/service_role 키는 코드에서 거부한다. 환경변수 이름은 `SUPABASE_URL`, `SUPABASE_KEY`, `BUTILL_ANALYSIS_ONLY`, `BUTILL_CORS_ORIGINS`이다. 외부 API 키는 `DATA_GO_KR_SERVICE_KEY`, `BIZINFO_API_KEY`, `SEOUL_OPENAPI_KEY`로 서버 `.env`에만 둔다.
 
 **남은 것**
 - 개발용 Supabase 프로젝트: 공용 하나 / 각자 / 로컬(`supabase start`)
 - 운영 프로젝트와 키는 누가 관리하나
-- `.env` 값은 어떻게 공유하나 (메신저 금지, 비밀번호 관리자 등)
+- `.env` 값은 어떻게 공유하나 (메신저 금지, 비밀번호 관리자 등). 외부 API 키가 평문 파일(`api.json` 등)과 채팅으로 공유된 적이 있으니 재발급 여부도 정한다.
 - KAMIS 가격 수집처럼 사용자 토큰 없이 돌아야 하는 서버 작업에 secret 키를 쓸지, 쓴다면 어디까지 쓸지
 - 운영 CORS 허용 출처(`BUTILL_CORS_ORIGINS`) 값
 
@@ -166,9 +168,11 @@ PR #17(`feature/mvp-analysis`)의 구현으로 정해진 내용은 `CONVENTION.m
 
 ---
 
-## 14. 계산 미리보기 API 공개 범위
+## 14. 로그인 없이 쓰는 API 공개 범위
 
-**왜:** `POST /api/v1/analyses/preview`, `POST /api/v1/scenarios/compare`는 인증 없이 누구나 호출할 수 있다. 저장은 하지 않지만 운영 서버에 그대로 열어 둘지 정해야 한다.
+**왜:** 아래 API는 인증 없이 누구나 호출할 수 있다. 사용자 데이터는 없지만 운영 서버에 그대로 열어 둘지 정해야 한다.
+- 계산 미리보기: `POST /api/v1/analyses/preview`, `POST /api/v1/scenarios/compare`
+- 외부 공개 자료: `GET /api/v1/ingredient-prices`, `GET /api/v1/support-programs` (외부 API 하루 호출 한도를 쓰므로 캐시로 보호 중)
 
 **정할 것**
 - 운영에서도 인증 없이 열어 둘지, 로그인 사용자만 쓰게 할지, 개발 환경에서만 열지
@@ -187,6 +191,40 @@ PR #17(`feature/mvp-analysis`)의 구현으로 정해진 내용은 `CONVENTION.m
 **선택지**
 - A. 규칙을 넓힌다: 계산 입력은 `XxxInput`을 허용하고, 매장 하위 자원은 `stores.py`에 둘 수 있게 한다.
 - B. 코드를 규칙에 맞춘다: 이름을 바꾸고 하위 자원 라우터를 파일별로 나눈다.
+
+**결정:**
+
+---
+
+## 16. 지원사업 정보 기능 범위
+
+**왜:** 지원사업 공고 조회(#20)는 PRD·TRD·프로그램목록에 없는 기능이다. Charter는 "정부 지원사업 신청 대행"을 범위 밖으로 둔다.
+
+**정할 것**
+- MVP에 넣을지, 넣는다면 프로그램목록·화면(UI)에 어떻게 추가할지
+- 범위: 공고 목록과 신청 링크 안내까지만 할지(현재 구현), 업종·업력별 맞춤 추천까지 할지
+- 필터 기준: 지금은 "소상공인 대상 + 서울 해당" 공고만 남긴다(전체 1,451건 중 약 50건). 외식업 관련 공고로 더 좁힐지
+
+**권장:** 공고 목록과 링크 안내까지만 MVP에 넣고, 맞춤 추천은 후속으로 둔다.
+
+**결정:**
+
+---
+
+## 17. 외부 데이터 저장 방식 (캐시 / DB)
+
+**왜:** 원재료 가격·지원사업 정보는 지금 서버 메모리에 3시간 캐시한다. TRD는 가격을 `ingredients`, `ingredient_prices`, `price_collection_runs` 테이블에 저장하도록 설계했다.
+
+**정할 것**
+- MVP를 캐시로 둘지, DB에 저장하고 정기 수집 작업(평일 저녁 1회 등)을 둘지
+- DB에 저장한다면 사용자 토큰 없이 쓰는 서버 작업용 키(#4)를 어떻게 관리할지
+- 서버를 여러 대 띄우거나 재시작하면 캐시가 비는 점을 받아들일지
+
+**선택지**
+- A. MVP는 캐시 유지. 구현이 끝났고 키 문제가 없다. 첫 호출이 약 10초 걸린다.
+- B. DB 저장 + 정기 수집. 설계 문서와 맞고 응답이 빠르지만, 서버 작업용 키와 수집 실행 환경을 정해야 한다.
+
+**권장:** 시연까지는 A, 운영을 고려하면 B로 옮긴다.
 
 **결정:**
 
