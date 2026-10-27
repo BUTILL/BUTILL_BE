@@ -14,6 +14,8 @@ from app.errors import DomainError
 from app.routers.stores import router as stores_router
 from app.routers.analyses import router as analyses_router
 from app.routers.scenarios import router as scenarios_router
+from app.routers.ingredient_prices import router as ingredient_prices_router
+from app.routers.support_programs import router as support_programs_router
 
 
 @asynccontextmanager
@@ -47,6 +49,8 @@ app.add_middleware(
 app.include_router(stores_router, prefix="/api/v1/stores", tags=["매장·경영정보 저장"])
 app.include_router(analyses_router, prefix="/api/v1/analyses", tags=["분석 미리보기"])
 app.include_router(scenarios_router, prefix="/api/v1/scenarios", tags=["시나리오 비교"])
+app.include_router(ingredient_prices_router, prefix="/api/v1/ingredient-prices", tags=["원재료 가격"])
+app.include_router(support_programs_router, prefix="/api/v1/support-programs", tags=["지원사업 정보"])
 
 
 @app.exception_handler(RequestValidationError)
