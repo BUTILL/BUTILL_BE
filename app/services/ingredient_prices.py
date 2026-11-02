@@ -4,19 +4,21 @@ from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from threading import Lock
 
-from app.database.kamis import open_kamis_client
+from app.database.ingredient_prices import PriceRepository, open_price_reader
+from app.errors import DomainError
 from app.schemas.ingredient_prices import (
-    CollectionResult, DailyPrice, IngredientPriceResponse, ItemCollection, PriceChange, PriceObservation, PriceSummary,
+    DailyPrice, IngredientPriceResponse, ItemCollection, ItemRunResult, PriceChange, PriceFilter, PriceItem,
+    PriceObservation, PriceSummary, StoredRun,
 )
-from app.services.price_collection import KST, collect_prices
+from app.services.price_collection import KST, check_period
 from app.services.price_items import PRICE_ITEMS
 
-LOOKBACK_DAYS = 21
+LOOKBACK_DAYS = 28
 WEEK_DAYS = 7
-CACHE_SECONDS = 3 * 60 * 60
-RETRY_CACHE_SECONDS = 10 * 60
+CACHE_SECONDS = 10 * 60
+MAX_CACHE_ENTRIES = 64
 
-_cache: dict[str, tuple[datetime, IngredientPriceResponse]] = {}
+_cache: dict[PriceFilter, tuple[datetime, IngredientPriceResponse]] = {}
 _lock = Lock()
 
 
@@ -61,44 +63,100 @@ def daily_averages(series: list[PriceObservation]) -> list[DailyPrice]:
 
 def summarize(collected: ItemCollection) -> PriceSummary:
     item = collected.item
+    meta = {"key": item.key, "name": item.name, "groups": item.groups, "region_code": item.region_code,
+            "error_code": collected.error_code, "missing_count": collected.missing_count,
+            "duplicate_count": collected.duplicate_count, "invalid_count": collected.invalid_count}
     series = main_series(collected.observations)
     if not series:
-        return PriceSummary(key=item.key, name=item.name, groups=item.groups, status=collected.status)
+        return PriceSummary(**meta, status="no_data" if collected.status == "success" else collected.status)
     daily = daily_averages(series)
     latest = daily[-1]
     week_ago = latest.price_date - timedelta(days=WEEK_DAYS)
     base = next((d for d in reversed(daily) if d.price_date <= week_ago), None)
     sample = series[-1]
-    return PriceSummary(key=item.key, name=item.name, groups=item.groups, status="success",
+    return PriceSummary(**meta, status=collected.status, stale=collected.status != "success",
                         kind_name=sample.kind_name, rank_name=sample.rank_name, unit=sample.unit, latest=latest,
                         week_change=price_change(base, latest) if base else None, daily=daily)
 
 
-def build_response(result: CollectionResult) -> IngredientPriceResponse:
-    return IngredientPriceResponse(collected_at=result.finished_at, status=result.status,
-                                   items=[summarize(r) for r in result.items])
+def selected_items(query: PriceFilter) -> list[PriceItem]:
+    return [i for i in PRICE_ITEMS
+            if (query.group is None or query.group in i.groups)
+            and (query.item is None or query.item == i.key)
+            and (query.region_code is None or query.region_code == i.region_code)]
 
 
-def fetch_latest(today: date) -> CollectionResult:
-    with open_kamis_client() as client:
-        return collect_prices(client, PRICE_ITEMS, today - timedelta(days=LOOKBACK_DAYS), today)
+def stored_observations(item: PriceItem, rows: list[dict], query: PriceFilter) -> list[PriceObservation]:
+    result = [PriceObservation(item_key=item.key, **row) for row in rows]
+    return [o for o in result
+            if (query.kind_code is None or query.kind_code == o.kind_code)
+            and (query.unit is None or query.unit == o.unit)]
 
 
-def latest_prices(group: str | None = None, fetch: Callable[[date], CollectionResult] | None = None) -> IngredientPriceResponse:
+def read_response(repo: PriceRepository, query: PriceFilter, today: date) -> IngredientPriceResponse:
+    end = query.end_date or today
+    start = query.start_date or end - timedelta(days=LOOKBACK_DAYS)
+    check_period(start, end)
+    raw_run = repo.latest_run()
+    if raw_run is None:
+        return IngredientPriceResponse(status="no_data", items=[
+            PriceSummary(key=i.key, name=i.name, groups=i.groups, region_code=i.region_code, status="no_data")
+            for i in selected_items(query)])
+    run = StoredRun.model_validate(raw_run)
+    items = selected_items(query)
+    results = {r.key: r for r in run.item_results}
+    ids = repo.ingredient_ids([i.key for i in items]) if items else {}
+    by_item = defaultdict(list)
+    if ids:
+        names = {value: key for key, value in ids.items()}
+        for row in repo.prices(list(ids.values()), start, end):
+            ingredient_id = row.pop("ingredient_id")
+            by_item[names[ingredient_id]].append(row)
+    summaries = []
+    for item in items:
+        result = results.get(item.key) or ItemRunResult(key=item.key, status="no_data")
+        summaries.append(summarize(ItemCollection(
+            item=item, status=result.status, error_code=result.error_code,
+            observations=stored_observations(item, by_item[item.key], query),
+            missing_count=result.missing_count, duplicate_count=result.duplicate_count,
+            invalid_count=result.invalid_count)))
+    return IngredientPriceResponse(collected_at=run.finished_at, last_success_at=repo.last_success_at(),
+                                   status=run.status, error_code=run.error_code,
+                                   stale=any(s.stale for s in summaries), items=summaries)
+
+
+def load_response(query: PriceFilter, today: date) -> IngredientPriceResponse:
+    with open_price_reader() as repo:
+        return read_response(repo, query, today)
+
+
+def failure_response(query: PriceFilter, code: str) -> IngredientPriceResponse:
+    return IngredientPriceResponse(status="failed", error_code=code, items=[
+        PriceSummary(key=i.key, name=i.name, groups=i.groups, region_code=i.region_code, status="failed", error_code=code)
+        for i in selected_items(query)])
+
+
+def latest_prices(query: PriceFilter, load: Callable[[PriceFilter, date], IngredientPriceResponse] | None = None) -> IngredientPriceResponse:
     now = datetime.now(KST)
-    key = now.date().isoformat()
     with _lock:
-        cached = _cache.get(key)
-        if cached is None or cached[0] <= now:
-            response = build_response((fetch or fetch_latest)(now.date()))
-            ttl = CACHE_SECONDS if response.status == "success" else RETRY_CACHE_SECONDS
-            _cache.clear()
-            _cache[key] = (now + timedelta(seconds=ttl), response)
-            cached = _cache[key]
-    response = cached[1]
-    if group is None:
-        return response
-    return response.model_copy(update={"items": [i for i in response.items if group in i.groups]})
+        cached = _cache.get(query)
+    if cached and cached[0] > now:
+        return cached[1]
+    try:
+        response = (load or load_response)(query, now.date())
+    except DomainError as exc:
+        if exc.code == "INVALID_PERIOD":
+            raise
+        if cached:
+            return cached[1].model_copy(update={"stale": True, "error_code": exc.code})
+        return failure_response(query, exc.code)
+    if response.status != "failed" or any(i.latest for i in response.items):
+        with _lock:
+            _cache.pop(query, None)
+            while len(_cache) >= MAX_CACHE_ENTRIES:
+                _cache.pop(next(iter(_cache)))
+            _cache[query] = (now + timedelta(seconds=CACHE_SECONDS), response)
+    return response
 
 
 def clear_cache() -> None:

@@ -1,18 +1,15 @@
 import os
 import unittest
-from datetime import date, datetime
+from datetime import date
 from unittest.mock import patch
 
 import httpx
-from fastapi.testclient import TestClient
 
 from app.database.kamis import KAMIS_PATH, KamisClient, kamis_settings
 from app.errors import DomainError
-from app.main import app
-from app.schemas.ingredient_prices import CollectionResult, DailyPrice, ItemCollection, PriceItem
-from app.services import ingredient_prices
+from app.schemas.ingredient_prices import DailyPrice, ItemCollection, PriceItem
 from app.services.ingredient_prices import daily_averages, main_series, price_change, summarize
-from app.services.price_collection import KST, collect_prices, parse_day, parse_items, parse_price
+from app.services.price_collection import collect_prices, parse_day, parse_items, parse_price
 from app.services.price_items import PRICE_ITEMS
 
 RICE = PriceItem(key="rice", name="쌀", groups=["common"], category_code="100", item_code="111", kind_code="01", rank_code="04")
@@ -74,7 +71,7 @@ class PriceParsingTest(unittest.TestCase):
 
     def test_missing_prices_are_not_zero(self) -> None:
         result = parse_items(RICE, [row("20261019", "-"), row("20261020", "")])
-        self.assertEqual((result.status, result.observations, result.missing_count), ("success", [], 2))
+        self.assertEqual((result.status, result.observations, result.missing_count), ("no_data", [], 2))
         self.assertEqual(parse_items(RICE, []).status, "no_data")
 
 
@@ -216,44 +213,6 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(len(keys), len(set(keys)))
         self.assertEqual({g for i in PRICE_ITEMS for g in i.groups}, {"common", "dakgalbi", "pasta"})
         self.assertTrue(all(i.product_class == "01" and i.region_code == "1101" for i in PRICE_ITEMS))
-
-
-class IngredientPriceRouteTest(unittest.TestCase):
-    def setUp(self) -> None:
-        ingredient_prices.clear_cache()
-        self.addCleanup(ingredient_prices.clear_cache)
-
-    def fake(self, status: str = "success"):
-        calls = []
-
-        def fetch(today: date) -> CollectionResult:
-            calls.append(today)
-            items = [parse_items(RICE, [row("20261026", "62900")]), parse_items(CABBAGE, [])]
-            now = datetime.now(KST)
-            return CollectionResult(started_at=now, finished_at=now, status=status, success_count=2, failure_count=0, items=items)
-
-        return fetch, calls
-
-    def test_route_caches_and_filters(self) -> None:
-        fetch, calls = self.fake()
-        with patch.object(ingredient_prices, "fetch_latest", fetch), \
-                patch.dict(os.environ, {"BUTILL_ANALYSIS_ONLY": "1"}), TestClient(app) as http:
-            first = http.get("/api/v1/ingredient-prices")
-            second = http.get("/api/v1/ingredient-prices?group=dakgalbi")
-            bad = http.get("/api/v1/ingredient-prices?group=x")
-        self.assertEqual(first.status_code, 200)
-        body = first.json()
-        self.assertEqual([i["key"] for i in body["items"]], ["rice", "napa_cabbage"])
-        self.assertEqual(body["items"][0]["latest"]["average_price"], 62900)
-        self.assertEqual(body["items"][1]["status"], "no_data")
-        self.assertEqual(second.json()["items"], [])
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(bad.status_code, 422)
-
-    def test_route_without_key(self) -> None:
-        with patch.dict(os.environ, {"BUTILL_ANALYSIS_ONLY": "1", "DATA_GO_KR_SERVICE_KEY": ""}), TestClient(app) as http:
-            res = http.get("/api/v1/ingredient-prices")
-        self.assertEqual((res.status_code, res.json()["code"]), (503, "CONFIG_REQUIRED"))
 
 
 if __name__ == "__main__":

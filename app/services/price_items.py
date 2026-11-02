@@ -8,6 +8,7 @@ PRICE_ITEMS = [
     PriceItem(key="garlic", name="깐마늘(국산)", groups=["common"], category_code="200", item_code="258", kind_code="01", rank_code="04"),
     PriceItem(key="napa_cabbage", name="배추", groups=["common"], category_code="200", item_code="211", rank_code="04"),
     PriceItem(key="egg", name="계란(특란 30구)", groups=["common"], category_code="500", item_code="9903", kind_code="23", rank_code="1"),
+    PriceItem(key="pork_belly", name="돼지고기 삼겹살", groups=["common"], category_code="500", item_code="4304", kind_code="27", rank_code="1"),
     PriceItem(key="chicken", name="닭(육계)", groups=["dakgalbi"], category_code="500", item_code="9901", kind_code="99", rank_code="1"),
     PriceItem(key="sweet_potato", name="고구마", groups=["dakgalbi"], category_code="100", item_code="151", kind_code="00", rank_code="04"),
     PriceItem(key="cabbage", name="양배추", groups=["dakgalbi"], category_code="200", item_code="212", kind_code="00", rank_code="04"),

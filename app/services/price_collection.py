@@ -2,13 +2,17 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
+from app.database.ingredient_prices import PriceRepository
 from app.database.kamis import KamisClient
 from app.errors import DomainError
-from app.schemas.ingredient_prices import CollectionResult, ItemCollection, PriceItem, PriceObservation
+from app.schemas.ingredient_prices import (
+    CollectionResult, ItemCollection, ItemRunResult, PriceItem, PriceObservation, StoredRun,
+)
 
 KST = timezone(timedelta(hours=9))
 MAX_PERIOD_DAYS = 366
 MAX_WORKERS = 5
+COLLECT_DAYS = 35
 REGION_MARKET = "-"
 WEIGHT_UNITS = frozenset({"g", "kg"})
 
@@ -68,7 +72,7 @@ def parse_items(item: PriceItem, rows: list) -> ItemCollection:
             price_per_kg=parse_price(row.get("exmn_dd_cnvs_prc")) if unit.lower() in WEIGHT_UNITS else None,
         ))
     observations.sort(key=lambda o: (o.price_date, o.kind_code, o.rank_code, o.market_code))
-    status = "success" if observations or missing else "no_data"
+    status = "success" if observations else "no_data"
     return ItemCollection(item=item, status=status, observations=observations,
                           missing_count=missing, duplicate_count=duplicate, invalid_count=invalid)
 
@@ -94,3 +98,45 @@ def collect_prices(client: KamisClient, items: list[PriceItem], start: date, end
     status = "success" if failures == 0 else "failed" if failures == len(results) else "partial"
     return CollectionResult(started_at=started, finished_at=datetime.now(KST), status=status,
                             success_count=len(results) - failures, failure_count=failures, items=results)
+
+
+def overall_status(results: list[ItemRunResult]) -> str:
+    failures = sum(1 for r in results if r.status == "failed")
+    return "success" if failures == 0 else "failed" if failures == len(results) else "partial"
+
+
+def run_result(collected: ItemCollection, status: str | None = None, error_code: str | None = None) -> ItemRunResult:
+    return ItemRunResult(key=collected.item.key, status=status or collected.status,
+                         error_code=error_code or collected.error_code, missing_count=collected.missing_count,
+                         duplicate_count=collected.duplicate_count, invalid_count=collected.invalid_count)
+
+
+def price_row(ingredient_id: str, o: PriceObservation, collected_at: datetime) -> dict:
+    return {"ingredient_id": ingredient_id, "price_date": o.price_date.isoformat(), "kind_code": o.kind_code,
+            "kind_name": o.kind_name, "rank_code": o.rank_code, "rank_name": o.rank_name, "unit": o.unit,
+            "market_code": o.market_code, "market_name": o.market_name, "price": o.price,
+            "price_per_kg": o.price_per_kg, "source": o.source, "collected_at": collected_at.isoformat()}
+
+
+def run_collection(client: KamisClient, repo: PriceRepository, items: list[PriceItem], today: date) -> StoredRun:
+    collected = collect_prices(client, items, today - timedelta(days=COLLECT_DAYS), today)
+    ids = repo.save_ingredients(items)
+    results = []
+    saved = 0
+    error_code = None
+    for entry in collected.items:
+        if error_code:
+            results.append(run_result(entry, "failed", error_code))
+            continue
+        try:
+            saved += repo.save_prices([price_row(ids[entry.item.key], o, collected.finished_at) for o in entry.observations])
+            results.append(run_result(entry))
+        except DomainError as exc:
+            error_code = exc.code
+            results.append(run_result(entry, "failed", error_code))
+    failures = sum(1 for r in results if r.status == "failed")
+    run = StoredRun(started_at=collected.started_at, finished_at=datetime.now(KST), status=overall_status(results),
+                    success_count=len(results) - failures, failure_count=failures, saved_count=saved,
+                    error_code=error_code, item_results=results)
+    repo.save_run(run.model_dump(mode="json"))
+    return run
