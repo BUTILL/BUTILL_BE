@@ -74,7 +74,7 @@ def health() -> dict[str, str]:
 @app.exception_handler(DomainError)
 async def domain_error(request: Request, exc: DomainError) -> JSONResponse:
     statuses = {"UNAUTHORIZED": 401, "FORBIDDEN": 403, "NOT_FOUND": 404, "CONFLICT": 409,
-                "SAVED_INPUT_INVALID": 409, "CALCULATION_VERSION_MISMATCH": 409, "INVALID_SCENARIO": 422}
+                "SAVED_INPUT_INVALID": 409, "CALCULATION_VERSION_MISMATCH": 409, "INVALID_SCENARIO": 422, "INVALID_PERIOD": 422}
     status = statuses.get(exc.code, 503)
     return JSONResponse(status_code=status, content={"code": exc.code, "message": exc.message},
                         headers={"WWW-Authenticate": "Bearer"} if status == 401 else None)
