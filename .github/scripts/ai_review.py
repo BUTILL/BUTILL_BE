@@ -4,10 +4,14 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
 DEFAULT_MODEL = "gemini-flash-latest"
+RETRY_CODES = (429, 500, 502, 503, 504)
+RETRY_WAITS = (10, 30, None)
+MAX_FALLBACK_MODELS = 2
 SKIP_MODEL_WORDS = ("lite", "image", "tts", "audio", "live", "embedding", "thinking", "exp", "preview")
 MAX_DIFF_CHARS = 150_000
 MAX_RULE_CHARS = 30_000
@@ -98,27 +102,42 @@ def version_key(name: str) -> tuple:
     return tuple(int(n) for n in re.findall(r"\d+", name)[:3])
 
 
-def pick_model(key: str) -> str | None:
+def flash_models(key: str) -> list[str]:
     models = http_json(f"{GEMINI_URL}?pageSize=1000", headers={"x-goog-api-key": key}).get("models", [])
     names = [m["name"].removeprefix("models/") for m in models
              if "generateContent" in m.get("supportedGenerationMethods", [])]
     flash = [n for n in names if "flash" in n and not any(w in n for w in SKIP_MODEL_WORDS)]
-    if not flash:
-        return None
-    return max(flash, key=lambda n: (version_key(n), "latest" not in n, n))
+    return sorted(flash, key=lambda n: (version_key(n), "latest" not in n, n), reverse=True)
+
+
+def call_with_retry(key: str, model: str, prompt: str) -> dict:
+    for wait in RETRY_WAITS:
+        try:
+            return call_gemini(key, model, prompt)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in RETRY_CODES or wait is None:
+                raise
+            print(f"{model} HTTP {exc.code}, {wait}초 후 다시 시도합니다.")
+            time.sleep(wait)
+    raise RuntimeError("unreachable")
 
 
 def review_with_fallback(key: str, model: str, prompt: str) -> tuple[dict, str]:
     try:
-        return call_gemini(key, model, prompt), model
+        return call_with_retry(key, model, prompt), model
     except urllib.error.HTTPError as exc:
-        if exc.code != 404:
+        if exc.code != 404 and exc.code not in RETRY_CODES:
             raise
-    picked = pick_model(key)
-    if not picked or picked == model:
-        raise urllib.error.HTTPError(GEMINI_URL, 404, "model not found", None, None)
-    print(f"모델 {model}을 찾을 수 없어 {picked}로 리뷰합니다.")
-    return call_gemini(key, picked, prompt), picked
+        last = exc
+    for other in [m for m in flash_models(key) if m != model][:MAX_FALLBACK_MODELS]:
+        print(f"{model} 대신 {other}로 리뷰합니다.")
+        try:
+            return call_with_retry(key, other, prompt), other
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404 and exc.code not in RETRY_CODES:
+                raise
+            last = exc
+    raise last
 
 
 def render(review: dict, model: str, files: list[str], truncated: bool, failed: bool) -> str:
