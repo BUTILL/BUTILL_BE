@@ -11,8 +11,8 @@ import urllib.request
 DEFAULT_MODEL = "gemini-flash-latest"
 RETRY_CODES = (429, 500, 502, 503, 504)
 RETRY_WAITS = (10, None)
-TIMEOUT = 150
-MAX_FALLBACK_MODELS = 2
+TIMEOUT = 90
+MAX_FALLBACK_MODELS = 6
 SKIP_MODEL_WORDS = ("lite", "image", "tts", "audio", "live", "embedding", "thinking", "exp", "preview")
 MAX_DIFF_CHARS = 150_000
 MAX_RULE_CHARS = 30_000
@@ -130,7 +130,13 @@ def call_with_retry(key: str, model: str, prompt: str) -> dict:
 
 
 def describe(exc: Exception) -> str:
-    return f"HTTP {exc.code}" if isinstance(exc, urllib.error.HTTPError) else type(exc).__name__
+    if not isinstance(exc, urllib.error.HTTPError):
+        return type(exc).__name__
+    try:
+        detail = json.loads(exc.read().decode("utf-8")).get("error", {})
+        return f"HTTP {exc.code} {detail.get('status', '')}: {str(detail.get('message', ''))[:200]}"
+    except (ValueError, AttributeError, OSError):
+        return f"HTTP {exc.code}"
 
 
 def review_with_fallback(key: str, model: str, prompt: str) -> tuple[dict, str]:
