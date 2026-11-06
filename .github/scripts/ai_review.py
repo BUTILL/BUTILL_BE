@@ -129,7 +129,13 @@ def review_with_fallback(key: str, model: str, prompt: str) -> tuple[dict, str]:
         if exc.code != 404 and exc.code not in RETRY_CODES:
             raise
         last = exc
-    for other in [m for m in flash_models(key) if m != model][:MAX_FALLBACK_MODELS]:
+    try:
+        candidates = flash_models(key)
+    except (urllib.error.URLError, ValueError, KeyError) as exc:
+        print(f"모델 목록 조회 실패: {exc}")
+        raise last from None
+    print("사용 가능한 flash 모델:", ", ".join(candidates) or "(없음)")
+    for other in [m for m in candidates if m != model][:MAX_FALLBACK_MODELS]:
         print(f"{model} 대신 {other}로 리뷰합니다.")
         try:
             return call_with_retry(key, other, prompt), other

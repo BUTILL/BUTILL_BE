@@ -53,4 +53,4 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python .github/scripts/ai_review.py
+        run: python -u .github/scripts/ai_review.py
