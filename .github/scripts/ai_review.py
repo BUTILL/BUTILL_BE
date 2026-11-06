@@ -1,12 +1,14 @@
 """PR 변경분을 Gemini로 리뷰하고 결과 코멘트를 남긴다. critical 문제가 있거나 리뷰에 실패하면 종료 코드 1."""
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
 import urllib.request
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-flash-latest"
+SKIP_MODEL_WORDS = ("lite", "image", "tts", "audio", "live", "embedding", "thinking", "exp", "preview")
 MAX_DIFF_CHARS = 150_000
 MAX_RULE_CHARS = 30_000
 MARKER = "<!-- ai-review -->"
@@ -92,6 +94,33 @@ def call_gemini(key: str, model: str, prompt: str) -> dict:
     return review
 
 
+def version_key(name: str) -> tuple:
+    return tuple(int(n) for n in re.findall(r"\d+", name)[:3])
+
+
+def pick_model(key: str) -> str | None:
+    models = http_json(f"{GEMINI_URL}?pageSize=1000", headers={"x-goog-api-key": key}).get("models", [])
+    names = [m["name"].removeprefix("models/") for m in models
+             if "generateContent" in m.get("supportedGenerationMethods", [])]
+    flash = [n for n in names if "flash" in n and not any(w in n for w in SKIP_MODEL_WORDS)]
+    if not flash:
+        return None
+    return max(flash, key=lambda n: (version_key(n), "latest" not in n, n))
+
+
+def review_with_fallback(key: str, model: str, prompt: str) -> tuple[dict, str]:
+    try:
+        return call_gemini(key, model, prompt), model
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            raise
+    picked = pick_model(key)
+    if not picked or picked == model:
+        raise urllib.error.HTTPError(GEMINI_URL, 404, "model not found", None, None)
+    print(f"모델 {model}을 찾을 수 없어 {picked}로 리뷰합니다.")
+    return call_gemini(key, picked, prompt), picked
+
+
 def render(review: dict, model: str, files: list[str], truncated: bool, failed: bool) -> str:
     findings = review.get("findings", [])
     counts = {s: sum(1 for f in findings if f.get("severity") == s) for s in SEVERITY_LABEL}
@@ -145,7 +174,7 @@ def main() -> int:
     prompt = (f"PR 제목: {os.environ.get('PR_TITLE', '')}\n\n"
               f"<규칙 문서 CONVENTION.md>\n{rules or '(없음)'}\n</규칙 문서>\n\n<diff>\n{diff}\n</diff>")
     try:
-        review = call_gemini(key, model, prompt)
+        review, model = review_with_fallback(key, model, prompt)
     except urllib.error.HTTPError as exc:
         return fail(f"Gemini API 오류 (HTTP {exc.code}). 모델 이름(`{model}`)이나 무료 사용량 한도를 확인하세요. "
                     "모델은 레포 변수 `GEMINI_MODEL`로 바꿀 수 있습니다.")
