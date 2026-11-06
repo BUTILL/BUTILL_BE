@@ -10,7 +10,8 @@ import urllib.request
 
 DEFAULT_MODEL = "gemini-flash-latest"
 RETRY_CODES = (429, 500, 502, 503, 504)
-RETRY_WAITS = (10, 30, None)
+RETRY_WAITS = (10, None)
+TIMEOUT = 150
 MAX_FALLBACK_MODELS = 2
 SKIP_MODEL_WORDS = ("lite", "image", "tts", "audio", "live", "embedding", "thinking", "exp", "preview")
 MAX_DIFF_CHARS = 150_000
@@ -79,7 +80,7 @@ def read_rules(head: str) -> str:
 def http_json(url: str, data: dict | None = None, headers: dict | None = None, method: str | None = None) -> dict | list:
     body = None if data is None else json.dumps(data).encode("utf-8")
     req = urllib.request.Request(url, data=body, method=method, headers={"Content-Type": "application/json", **(headers or {})})
-    with urllib.request.urlopen(req, timeout=120) as res:
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as res:
         raw = res.read().decode("utf-8")
         return json.loads(raw) if raw else {}
 
@@ -110,38 +111,45 @@ def flash_models(key: str) -> list[str]:
     return sorted(flash, key=lambda n: (version_key(n), "latest" not in n, n), reverse=True)
 
 
+def retryable(exc: Exception) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in RETRY_CODES or exc.code == 404
+    return isinstance(exc, (urllib.error.URLError, TimeoutError))
+
+
 def call_with_retry(key: str, model: str, prompt: str) -> dict:
     for wait in RETRY_WAITS:
         try:
             return call_gemini(key, model, prompt)
-        except urllib.error.HTTPError as exc:
-            if exc.code not in RETRY_CODES or wait is None:
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if not retryable(exc) or getattr(exc, "code", None) == 404 or wait is None:
                 raise
-            print(f"{model} HTTP {exc.code}, {wait}초 후 다시 시도합니다.")
+            print(f"{model}: {describe(exc)}, {wait}초 후 다시 시도합니다.")
             time.sleep(wait)
     raise RuntimeError("unreachable")
 
 
+def describe(exc: Exception) -> str:
+    return f"HTTP {exc.code}" if isinstance(exc, urllib.error.HTTPError) else type(exc).__name__
+
+
 def review_with_fallback(key: str, model: str, prompt: str) -> tuple[dict, str]:
     try:
-        return call_with_retry(key, model, prompt), model
-    except urllib.error.HTTPError as exc:
-        if exc.code != 404 and exc.code not in RETRY_CODES:
-            raise
-        last = exc
-    try:
         candidates = flash_models(key)
-    except (urllib.error.URLError, ValueError, KeyError) as exc:
-        print(f"모델 목록 조회 실패: {exc}")
-        raise last from None
-    print("사용 가능한 flash 모델:", ", ".join(candidates) or "(없음)")
-    for other in [m for m in candidates if m != model][:MAX_FALLBACK_MODELS]:
-        print(f"{model} 대신 {other}로 리뷰합니다.")
+        print("사용 가능한 flash 모델:", ", ".join(candidates) or "(없음)")
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as exc:
+        print(f"모델 목록 조회 실패: {describe(exc)}")
+        candidates = []
+    order = [model] + [m for m in candidates if m != model][:MAX_FALLBACK_MODELS]
+    last: Exception = RuntimeError("no model")
+    for name in order:
+        print(f"{name}로 리뷰합니다.")
         try:
-            return call_with_retry(key, other, prompt), other
-        except urllib.error.HTTPError as exc:
-            if exc.code != 404 and exc.code not in RETRY_CODES:
+            return call_with_retry(key, name, prompt), name
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if not retryable(exc):
                 raise
+            print(f"{name} 실패: {describe(exc)}")
             last = exc
     raise last
 
@@ -200,10 +208,10 @@ def main() -> int:
               f"<규칙 문서 CONVENTION.md>\n{rules or '(없음)'}\n</규칙 문서>\n\n<diff>\n{diff}\n</diff>")
     try:
         review, model = review_with_fallback(key, model, prompt)
-    except urllib.error.HTTPError as exc:
-        return fail(f"Gemini API 오류 (HTTP {exc.code}). 모델 이름(`{model}`)이나 무료 사용량 한도를 확인하세요. "
-                    "모델은 레포 변수 `GEMINI_MODEL`로 바꿀 수 있습니다.")
-    except (urllib.error.URLError, KeyError, IndexError, ValueError, json.JSONDecodeError) as exc:
+    except (urllib.error.URLError, TimeoutError) as exc:
+        return fail(f"Gemini API 오류 ({describe(exc)}). 일시적인 과부하일 수 있으니 다시 실행해 보세요. "
+                    "계속되면 레포 변수 `GEMINI_MODEL`로 모델을 바꾸거나 무료 사용량 한도를 확인하세요.")
+    except (KeyError, IndexError, ValueError, json.JSONDecodeError) as exc:
         return fail(f"Gemini 응답을 처리하지 못했습니다 ({type(exc).__name__}).")
     failed = any(f.get("severity") == "critical" for f in review["findings"])
     body = render(review, model, files, truncated, failed)
