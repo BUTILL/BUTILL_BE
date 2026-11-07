@@ -1,0 +1,42 @@
+name: AI 코드 리뷰
+
+on:
+  schedule:
+    - cron: "0 2 * * *"  # 매일 11:00 (한국 시간)
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "다시 리뷰할 PR 번호 (비우면 아직 리뷰 안 된 열린 PR 전체)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+
+concurrency:
+  group: ai-review
+  cancel-in-progress: false
+
+jobs:
+  ai-review:
+    name: AI 코드 리뷰 실행
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 열린 PR 리뷰
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: python -u .github/scripts/ai_review.py

@@ -29,28 +29,47 @@ jobs:
           if [ -d tests ]; then python -m unittest discover -s tests -v; else echo "tests 폴더가 없어 건너뜁니다."; fi
 
   ai-review:
-    name: ai-review
+    name: ai-review 대기 표시 (검사 설정 변경 시 즉시 리뷰)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
       issues: write
+      statuses: write
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: 검사 설정 변경 여부 확인
+        id: changes
+        run: |
+          if git diff --name-only "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" | grep -q '^\.github/'; then
+            echo "now=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "now=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: 새 커밋에 AI 리뷰 대기 상태 기록
+        if: steps.changes.outputs.now == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/ai-review.yml
+        run: |
+          gh api "repos/${{ github.repository }}/statuses/$SHA" \
+            -f state=pending -f context=ai-review \
+            -f description="매일 11시(한국 시간) AI 리뷰 예정. 급하면 수동 실행" \
+            -f target_url="$RUN_URL"
       - uses: actions/setup-python@v5
+        if: steps.changes.outputs.now == 'true'
         with:
           python-version: "3.12"
-      - name: AI 코드 리뷰
+      - name: 검사 설정을 바꾼 PR은 즉시 AI 리뷰
+        if: steps.changes.outputs.now == 'true'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           GITHUB_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python -u .github/scripts/ai_review.py
