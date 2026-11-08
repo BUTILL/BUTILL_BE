@@ -1,0 +1,49 @@
+{
+  "base": {
+    "start_month": "2026-11-01",
+    "months": 12,
+    "current_cash": 30000000,
+    "reserve_cash": 5000000,
+    "unpaid_initial_investment": 3000000,
+    "monthly_sales": 18000000,
+    "monthly_ingredient_cost": 6000000,
+    "fixed_expenses": [
+      {
+        "name": "임대료",
+        "amount": 2000000
+      },
+      {
+        "name": "인건비",
+        "amount": 7000000
+      },
+      {
+        "name": "공과금 등",
+        "amount": 1000000
+      }
+    ],
+    "irregular_expenses": [
+      {
+        "name": "설비 수리",
+        "amount": 3000000,
+        "expected_date": "2027-01-15",
+        "is_paid": false
+      }
+    ],
+    "monthly_overrides": []
+  },
+  "scenarios": [
+    {
+      "name": "매출 20% 감소",
+      "sales_change_bps": -2000
+    },
+    {
+      "name": "식재료비 15% 상승",
+      "ingredient_change_bps": 1500
+    },
+    {
+      "name": "매출 10% 감소와 식재료비 10% 상승",
+      "sales_change_bps": -1000,
+      "ingredient_change_bps": 1000
+    }
+  ]
+}

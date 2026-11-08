@@ -1,0 +1,34 @@
+{
+  "input": {
+    "start_month": "2026-11-01",
+    "months": 12,
+    "current_cash": 30000000,
+    "reserve_cash": 5000000,
+    "unpaid_initial_investment": 3000000,
+    "monthly_sales": 18000000,
+    "monthly_ingredient_cost": 6000000,
+    "fixed_expenses": [
+      {
+        "name": "임대료",
+        "amount": 2000000
+      },
+      {
+        "name": "인건비",
+        "amount": 7000000
+      },
+      {
+        "name": "공과금 등",
+        "amount": 1000000
+      }
+    ],
+    "irregular_expenses": [
+      {
+        "name": "설비 수리",
+        "amount": 3000000,
+        "expected_date": "2027-01-15",
+        "is_paid": false
+      }
+    ],
+    "monthly_overrides": []
+  }
+}

@@ -1,0 +1,81 @@
+name: PR 검사
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 의존성 설치
+        run: |
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; else pip install -r requirements.txt; fi
+      - name: 테스트
+        run: |
+          if [ -d tests ]; then python -m unittest discover -s tests -v; else echo "tests 폴더가 없어 건너뜁니다."; fi
+
+  ai-review:
+    name: ai-review 대기 표시 (검사 설정 변경 시 즉시 리뷰)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 검사 설정 변경 여부 확인
+        id: changes
+        run: |
+          if git diff --name-only "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" | grep -q '^\.github/'; then
+            echo "now=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "now=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: 새 커밋에 AI 리뷰 대기 상태 기록
+        if: steps.changes.outputs.now == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/ai-review.yml
+        run: |
+          done_state=$(gh api "repos/${{ github.repository }}/commits/$SHA/statuses" \
+            --jq '[.[] | select(.context == "ai-review")][0].state // ""')
+          if [ "$done_state" = "success" ] || [ "$done_state" = "failure" ]; then
+            echo "이 커밋은 이미 AI 리뷰 결과($done_state)가 있어 대기로 바꾸지 않습니다."
+            exit 0
+          fi
+          gh api "repos/${{ github.repository }}/statuses/$SHA" \
+            -f state=pending -f context=ai-review \
+            -f description="매일 오전(한국 시간) 예약 AI 리뷰 예정. 급하면 수동 실행" \
+            -f target_url="$RUN_URL"
+      - uses: actions/setup-python@v5
+        if: steps.changes.outputs.now == 'true'
+        with:
+          python-version: "3.12"
+      - name: 검사 설정을 바꾼 PR은 즉시 AI 리뷰
+        if: steps.changes.outputs.now == 'true'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          GITHUB_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: python -u .github/scripts/ai_review.py
