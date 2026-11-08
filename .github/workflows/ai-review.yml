@@ -2,7 +2,7 @@ name: AI 코드 리뷰
 
 on:
   schedule:
-    - cron: "0 2 * * *"  # 매일 11:00 (한국 시간)
+    - cron: "47 1 * * *"  # 매일 10:47 (한국 시간). 정각은 GitHub 예약이 몰려 크게 늦어질 수 있다
   workflow_dispatch:
     inputs:
       pr_number:
