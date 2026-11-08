@@ -71,14 +71,20 @@ def git(*args: str) -> str:
     return subprocess.run(["git", *args], check=True, capture_output=True, text=True, encoding="utf-8").stdout
 
 
-def build_diff(base: str, head: str) -> tuple[str, list[str], bool]:
+def build_diff(base: str, head: str) -> tuple[str, list[str], list[str]]:
+    """변경분을 파일 단위로 이어 붙인다. 한도를 넘으면 문장 중간이 아니라 파일 경계에서 자르고 빠진 파일을 돌려준다."""
     files = [f for f in git("diff", "--name-only", f"{base}...{head}").splitlines() if f]
     reviewed = [f for f in files if not f.lower().endswith(SKIP_SUFFIXES)]
-    if not reviewed:
-        return "", [], False
-    diff = git("diff", "--unified=5", "--no-color", f"{base}...{head}", "--", *reviewed)
-    truncated = len(diff) > MAX_DIFF_CHARS
-    return diff[:MAX_DIFF_CHARS], reviewed, truncated
+    parts, omitted, size = [], [], 0
+    for name in reviewed:
+        part = git("diff", "--unified=5", "--no-color", f"{base}...{head}", "--", name)
+        if size + len(part) > MAX_DIFF_CHARS:
+            omitted.append(name)
+            continue
+        parts.append(part)
+        size += len(part)
+    included = [f for f in reviewed if f not in omitted]
+    return "".join(parts), included, omitted
 
 
 def read_rules(head: str) -> str:
@@ -176,15 +182,16 @@ def review_with_fallback(key: str, model: str, prompt: str) -> tuple[dict, str]:
     raise last
 
 
-def render(review: dict, model: str, files: list[str], truncated: bool, failed: bool) -> str:
+def render(review: dict, model: str, files: list[str], omitted: list[str], failed: bool) -> str:
     findings = review.get("findings", [])
     counts = {s: sum(1 for f in findings if f.get("severity") == s) for s in SEVERITY_LABEL}
     verdict = "❌ 실패 (critical 발견)" if failed else "✅ 통과"
     lines = [MARKER, f"## AI 코드 리뷰: {verdict}", "",
              f"critical {counts['critical']} · major {counts['major']} · minor {counts['minor']} · 검토 파일 {len(files)}개 · 모델 `{model}`", "",
              review.get("summary", "").strip()]
-    if truncated:
-        lines += ["", f"> 변경분이 길어 앞부분 {MAX_DIFF_CHARS:,}자만 검토했습니다."]
+    if omitted:
+        lines += ["", f"> 변경분이 길어 파일 {len(omitted)}개는 검토하지 못했습니다: " + ", ".join(f"`{f}`" for f in omitted[:20])
+                  + (" 외" if len(omitted) > 20 else "")]
     order = {"critical": 0, "major": 1, "minor": 2}
     for f in sorted(findings, key=lambda x: order.get(x.get("severity"), 3)):
         where = f"`{f.get('file', '')}`" + (f":{f['line']}" if f.get("line") else "")
@@ -230,14 +237,17 @@ def review_pr(pr: dict, key: str, model: str) -> str:
     number, sha = pr["number"], pr["head"]["sha"]
     set_status(sha, "pending", "AI 리뷰 중")
     base, head = fetch_pr(pr)
-    diff, files, truncated = build_diff(base, head)
-    if not files:
+    diff, files, omitted = build_diff(base, head)
+    if not files and not omitted:
         upsert_comment(number, f"{MARKER}\n## AI 코드 리뷰: ✅ 통과\n\n검토할 코드 변경이 없습니다.")
         set_status(sha, "success", "검토할 코드 변경 없음")
         return "success"
     rules = read_rules(head)
     prompt = (f"PR 제목: {pr.get('title', '')}\n\n"
-              f"<규칙 문서 CONVENTION.md>\n{rules or '(없음)'}\n</규칙 문서>\n\n<diff>\n{diff}\n</diff>")
+              f"<규칙 문서 CONVENTION.md>\n{rules or '(없음)'}\n</규칙 문서>\n\n"
+              + ("<검토 제외 파일 (길이 한도로 diff에 넣지 않음. 판단하지 말 것)>\n" + "\n".join(omitted)
+                 + "\n</검토 제외 파일>\n\n" if omitted else "")
+              + f"<diff>\n{diff}\n</diff>")
     try:
         review, used = review_with_fallback(key, model, prompt)
     except (urllib.error.URLError, TimeoutError) as exc:
@@ -246,7 +256,7 @@ def review_pr(pr: dict, key: str, model: str) -> str:
         return review_error(number, sha, f"Gemini 응답을 처리하지 못했습니다 ({type(exc).__name__}).")
     findings = review["findings"]
     failed = any(f.get("severity") == "critical" for f in findings)
-    upsert_comment(number, render(review, used, files, truncated, failed))
+    upsert_comment(number, render(review, used, files, omitted, failed))
     counts = " · ".join(f"{s} {sum(1 for f in findings if f.get('severity') == s)}" for s in SEVERITY_LABEL)
     set_status(sha, "failure" if failed else "success", ("critical 발견 · " if failed else "통과 · ") + counts)
     return "failure" if failed else "success"
