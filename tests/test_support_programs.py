@@ -1,6 +1,6 @@
 import os
 import unittest
-from datetime import date
+from datetime import date, datetime, timedelta
 from unittest.mock import patch
 
 import httpx
@@ -11,6 +11,7 @@ from app.errors import DomainError
 from app.main import app
 from app.schemas.support_programs import SupportCollection, SupportProgram
 from app.services import support_programs
+from app.services.price_collection import KST
 from app.services.support_programs import collect_support_programs, from_bizinfo, open_programs, parse_period
 
 SECRET = "secret/key+value"
@@ -125,6 +126,12 @@ class CollectTest(unittest.TestCase):
         self.assertEqual(sorted(p.program_id for p in result.programs), ["A", "B", "E"])
         self.assertEqual((result.fetched_count, result.matched_count), (7, 3))
 
+    def test_hashtag_partial_match(self) -> None:
+        rows = [biz_row("H", "경영 개선 지원", trgetNm="중소기업", hashTags="소상공인지원,서울특별시", jrsdInsttNm="중소벤처기업부"),
+                biz_row("I", "경영 개선 지원2", trgetNm="중소기업", hashTags="중소기업,서울특별시", jrsdInsttNm="중소벤처기업부")]
+        result = collect_support_programs(biz_client(lambda req: httpx.Response(200, json={"jsonArray": rows})), today=TODAY)
+        self.assertEqual([p.program_id for p in result.programs], ["H"])
+
     def test_failed(self) -> None:
         client = biz_client(lambda req: httpx.Response(200, json={"reqErr": "인증키를 입력해주세요."}))
         result = collect_support_programs(client, today=TODAY)
@@ -151,6 +158,41 @@ class SupportRouteTest(unittest.TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual([p["program_id"] for p in first.json()["programs"]], ["P1"])
         self.assertEqual(len(calls), 1)
+
+    def success(self, pid: str = "P1") -> SupportCollection:
+        return collect_support_programs(biz_client(lambda req: httpx.Response(200, json={"jsonArray": [biz_row(pid, "공고")]})),
+                                        today=TODAY)
+
+    def expire(self) -> None:
+        key, (_, value) = next(iter(support_programs._cache.items()))
+        support_programs._cache[key] = (datetime.now(KST) - timedelta(seconds=1), value)
+
+    def test_fetch_runs_without_holding_lock(self) -> None:
+        def fetch(today: date) -> SupportCollection:
+            self.assertTrue(support_programs._lock.acquire(blocking=False))
+            support_programs._lock.release()
+            return self.success()
+        self.assertEqual(support_programs.latest_programs(fetch).status, "success")
+
+    def test_failure_keeps_last_success_as_stale(self) -> None:
+        support_programs.latest_programs(lambda today: self.success())
+        self.expire()
+        failed = SupportCollection(collected_at=datetime.now(KST), status="failed", error_code="SUPPORT_SOURCE_UNAVAILABLE", programs=[])
+        result = support_programs.latest_programs(lambda today: failed)
+        self.assertEqual((result.status, result.stale, result.error_code, [p.program_id for p in result.programs]),
+                         ("success", True, "SUPPORT_SOURCE_UNAVAILABLE", ["P1"]))
+        self.expire()
+
+        def boom(today: date) -> SupportCollection:
+            raise DomainError("SUPPORT_SOURCE_UNAVAILABLE", "x")
+        self.assertTrue(support_programs.latest_programs(boom).stale)
+
+    def test_failure_without_cache_is_not_cached_long(self) -> None:
+        failed = SupportCollection(collected_at=datetime.now(KST), status="failed", error_code="X", programs=[])
+        support_programs.latest_programs(lambda today: failed)
+        expires, value = next(iter(support_programs._cache.values()))
+        self.assertLessEqual(expires - datetime.now(KST), timedelta(seconds=support_programs.RETRY_CACHE_SECONDS))
+        self.assertEqual(support_programs.latest_programs(lambda today: self.success()).status, "failed")
 
     def test_route_without_key(self) -> None:
         with patch.dict(os.environ, {"BUTILL_ANALYSIS_ONLY": "1", "BIZINFO_API_KEY": ""}), TestClient(app) as http:

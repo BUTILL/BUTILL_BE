@@ -90,12 +90,12 @@ def open_programs(programs: list[SupportProgram], today: date) -> list[SupportPr
 
 def is_relevant(item: SupportProgram) -> bool:
     for_small_business = TARGET_KEYWORD in (item.target or "") or TARGET_KEYWORD in item.title \
-        or TARGET_KEYWORD in item.hashtags
+        or any(TARGET_KEYWORD in tag for tag in item.hashtags)
     agency = item.agency or ""
     prefix = TITLE_REGION.match(item.title)
     other_region = (prefix is not None and prefix.group(1) != REGION) \
         or (LOCAL_GOVERNMENT.search(agency) is not None and not agency.startswith(REGION))
-    in_region = REGION in item.hashtags or item.title.startswith(f"[{REGION}]") or agency.startswith(REGION)
+    in_region = any(tag.startswith(REGION) for tag in item.hashtags) or item.title.startswith(f"[{REGION}]") or agency.startswith(REGION)
     return for_small_business and in_region and not other_region
 
 
@@ -122,14 +122,23 @@ def latest_programs(fetch: Callable[[date], SupportCollection] | None = None) ->
     now = datetime.now(KST)
     key = now.date().isoformat()
     with _lock:
-        cached = _cache.get(key)
-        if cached is None or cached[0] <= now:
-            result = (fetch or fetch_programs)(now.date())
-            ttl = CACHE_SECONDS if result.status == "success" else RETRY_CACHE_SECONDS
-            _cache.clear()
-            _cache[key] = (now + timedelta(seconds=ttl), result)
-            cached = _cache[key]
-    return cached[1]
+        cached = _cache.get(key) or next(iter(_cache.values()), None)
+    if cached and cached[0] > now:
+        return cached[1]
+    last_good = cached[1] if cached and cached[1].status == "success" else None
+    try:
+        result = (fetch or fetch_programs)(now.date())
+    except DomainError:
+        if last_good is None:
+            raise
+        result = SupportCollection(collected_at=now, status="failed", error_code="SUPPORT_SOURCE_UNAVAILABLE", programs=[])
+    if result.status != "success" and last_good is not None:
+        result = last_good.model_copy(update={"stale": True, "error_code": result.error_code})
+    ttl = CACHE_SECONDS if result.status == "success" and not result.stale else RETRY_CACHE_SECONDS
+    with _lock:
+        _cache.clear()
+        _cache[key] = (now + timedelta(seconds=ttl), result)
+    return result
 
 
 def clear_cache() -> None:
