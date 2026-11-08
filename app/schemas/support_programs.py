@@ -27,6 +27,7 @@ class SupportCollection(Model):
     collected_at: datetime
     status: Literal["success", "failed"]
     error_code: str | None = None
+    stale: bool = False
     fetched_count: int = 0
     skipped_count: int = 0
     matched_count: int = 0
