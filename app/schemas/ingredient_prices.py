@@ -96,6 +96,12 @@ class DailyPrice(Model):
     market_count: int
 
 
+class WeeklyPrice(Model):
+    week_start: date
+    average_price: int
+    days: int
+
+
 class PriceChange(Model):
     base_date: date
     base_price: int
@@ -119,6 +125,7 @@ class PriceSummary(Model):
     latest: DailyPrice | None = None
     week_change: PriceChange | None = None
     daily: list[DailyPrice] = Field(default_factory=list)
+    weekly: list[WeeklyPrice] = Field(default_factory=list)
     missing_count: int = 0
     duplicate_count: int = 0
     invalid_count: int = 0
