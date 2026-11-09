@@ -7,7 +7,7 @@ from threading import Lock
 from app.database.ingredient_prices import PriceRepository, open_price_reader
 from app.errors import DomainError
 from app.schemas.ingredient_prices import (
-    DailyPrice, IngredientPriceResponse, ItemCollection, ItemRunResult, PriceChange, PriceFilter, PriceItem,
+    DailyPrice, IngredientPriceResponse, WeeklyPrice, ItemCollection, ItemRunResult, PriceChange, PriceFilter, PriceItem,
     PriceObservation, PriceSummary, StoredRun,
 )
 from app.services.price_collection import KST, check_period
@@ -61,6 +61,13 @@ def daily_averages(series: list[PriceObservation]) -> list[DailyPrice]:
     return result
 
 
+def weekly_averages(daily: list[DailyPrice]) -> list[WeeklyPrice]:
+    weeks = defaultdict(list)
+    for d in daily:
+        weeks[d.price_date - timedelta(days=d.price_date.weekday())].append(d.average_price)
+    return [WeeklyPrice(week_start=start, average_price=rounded(sum(v), len(v)), days=len(v)) for start, v in sorted(weeks.items())]
+
+
 def summarize(collected: ItemCollection) -> PriceSummary:
     item = collected.item
     meta = {"key": item.key, "name": item.name, "groups": item.groups, "region_code": item.region_code,
@@ -76,7 +83,8 @@ def summarize(collected: ItemCollection) -> PriceSummary:
     sample = series[-1]
     return PriceSummary(**meta, status=collected.status, stale=collected.status != "success",
                         kind_name=sample.kind_name, rank_name=sample.rank_name, unit=sample.unit, latest=latest,
-                        week_change=price_change(base, latest) if base else None, daily=daily)
+                        week_change=price_change(base, latest) if base else None, daily=daily,
+                        weekly=weekly_averages(daily))
 
 
 def selected_items(query: PriceFilter) -> list[PriceItem]:
